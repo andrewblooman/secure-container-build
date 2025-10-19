@@ -79,12 +79,24 @@ jobs:
           syft "docker:${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}" -o spdx-json > sbom.spdx.json
           echo "✅ SBOM generated"
           ls -lh sbom.spdx.json
+          
+      - name: Create SBOM predicate
+        run: |
+          # Create a proper predicate wrapper for the SBOM
+          jq -n --slurpfile sbom sbom.spdx.json '{
+            predicateType: "https://spdx.dev/Document",
+            predicate: $sbom[0]
+          }' > sbom-predicate.json
+          echo "✅ SBOM predicate created"
+          ls -lh sbom-predicate.json
 
       - name: Upload SBOM artifact
         uses: actions/upload-artifact@v4
         with:
           name: sbom
-          path: sbom.spdx.json
+          path: |
+            sbom.spdx.json
+            sbom-predicate.json
           retention-days: 5
 
   sign-and-attest:
@@ -120,9 +132,12 @@ jobs:
         env:
           COSIGN_EXPERIMENTAL: "true"
         run: |
+          ls -la
+          echo "Files available:"
+          cat sbom-predicate.json | jq .predicateType
           cosign attest \
-            --predicate sbom.spdx.json \
-            --type spdx \
+            --predicate sbom-predicate.json \
+            --type https://spdx.dev/Document \
             ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
           echo "✅ SBOM attestation created and signed"
 
