@@ -116,13 +116,12 @@ jobs:
         run: |
           cosign sign ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} --yes
 
-      - name: Attach and sign SBOM
+      - name: Attach SBOM
         env:
           COSIGN_EXPERIMENTAL: "true"
         run: |
           cosign attach sbom --sbom sbom.spdx.json ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
-          cosign sign ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}-sbom --yes
-          echo "✅ SBOM attached and signed"
+          echo "✅ SBOM attached to image"
 
       - name: Generate provenance
         run: |

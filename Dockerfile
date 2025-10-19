@@ -1,5 +1,16 @@
 FROM python:3.11-slim AS base
 
+# OCI standard labels
+LABEL org.opencontainers.image.title="Secure Container Build"
+LABEL org.opencontainers.image.description="A secure Python Flask application with vulnerability scanning and SBOM"
+LABEL org.opencontainers.image.authors="andyblooman"
+LABEL org.opencontainers.image.vendor="andyblooman"
+LABEL org.opencontainers.image.licenses="MIT"
+LABEL org.opencontainers.image.version="1.0.0"
+LABEL org.opencontainers.image.source="https://github.com/andyblooman/secure-container-build"
+LABEL org.opencontainers.image.documentation="https://github.com/andyblooman/secure-container-build/README.md"
+LABEL org.opencontainers.image.base.name="python:3.11-slim"
+
 WORKDIR /app
 
 # Install system dependencies
