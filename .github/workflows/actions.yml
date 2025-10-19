@@ -54,7 +54,7 @@ jobs:
       - name: Pull image for scanning
         run: |
           echo "Pulling image: ${{ needs.build.outputs.image_uri }}"
-          docker pull "${{ needs.build.outputs.image_uri }}"
+          docker pull ${{ needs.build.outputs.image_uri }}
 
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
@@ -83,7 +83,7 @@ jobs:
       - name: Pull image for SBOM generation
         run: |
           echo "Pulling image: ${{ needs.build.outputs.image_uri }}"
-          docker pull "${{ needs.build.outputs.image_uri }}"
+          docker pull ${{ needs.build.outputs.image_uri }}
 
       - name: Install Syft
         run: |
