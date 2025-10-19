@@ -9,8 +9,8 @@ This project demonstrates a secure container build pipeline that implements mode
 - 📝 Generates Software Bill of Materials (SBOM) using Syft
 - ✍️ Signs the container image using Cosign with keyless signing
 - 📦 Publishes the image to Docker Hub
-- 📄 Attaches SBOM as OCI artifact
-- ✅ Generates and attaches provenance attestation
+- 📄 Attests and signs SBOM as cryptographic attestation
+- ✅ Generates and attests provenance
 
 ## Workflow Steps
 
@@ -96,19 +96,18 @@ cosign verify \
   docker.io/andyblooman/secure-container-build:latest
 ```
 
-### Verify SBOM Attestation
+### View Attached SBOM
 
-Verify and view the attached SBOM:
+Download and view the attached SBOM:
 
 ```bash
-# Verify the SBOM attestation
-cosign verify-attestation \
-  --type spdx \
-  --certificate-identity-regexp "https://github.com/andrewblooman/secure-container-build/.*" \
-  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  docker.io/andyblooman/secure-container-build:latest
+# Download the SBOM
+cosign download sbom docker.io/andyblooman/secure-container-build:latest > sbom.spdx.json
 
-# Download and view the SBOM
+# View the SBOM (requires jq)
+cat sbom.spdx.json | jq .
+
+# Or view it directly
 cosign download sbom docker.io/andyblooman/secure-container-build:latest | jq .
 ```
 
