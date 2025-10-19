@@ -29,13 +29,13 @@ This project demonstrates a secure container build pipeline that implements mode
 3. **SBOM Generation**
    - Creates Software Bill of Materials using Syft
    - Generates SPDX JSON format
-   - Uploads SBOM as artifact for later signing
+   - Uploads SBOM as artifact for attestation
 
 4. **Image Signing & Attestation**
    - Uses Cosign for keyless signing via Sigstore
-   - Attaches SBOM to image as OCI artifact
+   - Creates cryptographically signed SBOM attestation
    - Generates SLSA-style provenance attestation
-   - Signs provenance and attaches to image
+   - Signs image and all attestations
    - All signing uses GitHub Actions OIDC tokens
 
 ## Usage
@@ -96,19 +96,24 @@ cosign verify \
   docker.io/andyblooman/secure-container-build:latest
 ```
 
-### View Attached SBOM
+### Verify and View SBOM Attestation
 
-Download and view the attached SBOM:
+Verify the cryptographically signed SBOM attestation:
 
 ```bash
-# Download the SBOM
-cosign download sbom docker.io/andyblooman/secure-container-build:latest > sbom.spdx.json
+# Verify the SBOM attestation
+cosign verify-attestation \
+  --type https://spdx.dev/Document \
+  --certificate-identity-regexp "https://github.com/andrewblooman/secure-container-build/.*" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  docker.io/andyblooman/secure-container-build:latest
 
-# View the SBOM (requires jq)
-cat sbom.spdx.json | jq .
-
-# Or view it directly
-cosign download sbom docker.io/andyblooman/secure-container-build:latest | jq .
+# View the SBOM content (with jq for formatting)
+cosign verify-attestation \
+  --type https://spdx.dev/Document \
+  --certificate-identity-regexp "https://github.com/andrewblooman/secure-container-build/.*" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  docker.io/andyblooman/secure-container-build:latest | jq -r '.payload' | base64 -d | jq .predicate
 ```
 
 ### Verify Provenance Attestation
