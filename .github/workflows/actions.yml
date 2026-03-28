@@ -47,15 +47,14 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@master
+      - name: Run Grype vulnerability scanner
+        uses: anchore/scan-action@v3
         with:
-          scan-type: 'image'
-          image-ref: '${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}'
-          format: 'table'
-          severity: 'HIGH,CRITICAL'
-          ignore-unfixed: true
-          exit-code: 0
+          image: '${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}'
+          output-format: 'table'
+          severity-cutoff: 'high'
+          only-fixed: false
+          fail-build: false
 
   sbom:
     needs: build

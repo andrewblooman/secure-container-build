@@ -5,7 +5,7 @@ This project demonstrates a secure container build pipeline that implements mode
 ## Features
 
 - 🔨 Builds a Python Flask application container image with OCI standard labels
-- 🔍 Performs vulnerability scanning using Trivy
+- 🔍 Performs vulnerability scanning using Grype
 - 📝 Generates Software Bill of Materials (SBOM) using Syft
 - ✍️ Signs the container image using Cosign with keyless signing
 - 📦 Publishes the image to Docker Hub
@@ -22,7 +22,7 @@ This project demonstrates a secure container build pipeline that implements mode
    - Builds Flask application
 
 2. **Security Scanning**
-   - Scans container image using Trivy
+   - Scans container image using Grype
    - Checks for HIGH and CRITICAL vulnerabilities
    - Identifies known CVEs in dependencies
 
