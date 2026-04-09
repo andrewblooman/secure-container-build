@@ -1,4 +1,4 @@
-name: Security Engineer Agent (Reusable)
+name: Security Engineer Agent
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Reusable workflow — call this from any pipeline that has already uploaded

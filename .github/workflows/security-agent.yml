@@ -1,4 +1,4 @@
-name: Security Engineer Agent Example
+name: Security Engineer Agent
 
 on:
   pull_request:
