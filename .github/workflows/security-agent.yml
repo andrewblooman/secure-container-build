@@ -134,7 +134,7 @@ jobs:
           path: snyk-container.json
 
   # ──────────────────────────────────────────────
-  # Stage 3: Security Engineer Agent - AI Review
+  # Stage 4: Security Engineer Agent - AI Review
   # Calls the reusable workflow defined in security-review.yml
   # ──────────────────────────────────────────────
   security-agent-review:

@@ -2,14 +2,18 @@ name: Security Engineer Agent (Reusable)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Reusable workflow — call this from any pipeline that has already uploaded
-# Snyk scan artefacts named snyk-*-results to the current workflow run.
+# Snyk scan artefacts named snyk-*-results to the SAME workflow run.
 #
-# Usage example:
+# Note: actions/download-artifact only works within the same run, so this
+# workflow must be called as a job within the same pipeline that ran the scans,
+# not from a separate workflow run in a different repository.
+#
+# Usage example (same repo, same run):
 #
 #   security-review:
 #     needs: [snyk-code-scan, snyk-container-scan]
 #     if: always()
-#     uses: andrewblooman/secure-container-build/.github/workflows/security-review.yml@main
+#     uses: ./.github/workflows/security-review.yml
 #     with:
 #       pr-number: ${{ github.event.pull_request.number }}
 #     secrets:
@@ -38,7 +42,7 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
+  pull-requests: read   # PR writes go through the GitHub App token, not GITHUB_TOKEN
 
 jobs:
   review:
@@ -61,18 +65,19 @@ jobs:
           echo "" >> /tmp/security-context.md
 
           # Parse SARIF from Snyk Code
+          # SARIF levels: error=critical/high, warning=medium, note=low
           for sarif in /tmp/scan-results/*.sarif; do
             [ -f "$sarif" ] || continue
             filename=$(basename "$sarif" .sarif)
             echo "### ${filename}" >> /tmp/security-context.md
-            results=$(jq '[.runs[].results[]] | length' "$sarif" 2>/dev/null || echo "0")
-            critical=$(jq '[.runs[].results[] | select(.level == "error")]   | length' "$sarif" 2>/dev/null || echo "0")
-            high=$(    jq '[.runs[].results[] | select(.level == "warning")] | length' "$sarif" 2>/dev/null || echo "0")
-            medium=$(  jq '[.runs[].results[] | select(.level == "note")]    | length' "$sarif" 2>/dev/null || echo "0")
+            results=$(  jq '[.runs[].results[]] | length'                                    "$sarif" 2>/dev/null || echo "0")
+            critical=$( jq '[.runs[].results[] | select(.level == "error")]   | length'      "$sarif" 2>/dev/null || echo "0")
+            medium=$(   jq '[.runs[].results[] | select(.level == "warning")] | length'      "$sarif" 2>/dev/null || echo "0")
+            low=$(      jq '[.runs[].results[] | select(.level == "note")]    | length'      "$sarif" 2>/dev/null || echo "0")
             echo "- Total findings: ${results}" >> /tmp/security-context.md
             echo "- Critical/Error: ${critical}" >> /tmp/security-context.md
-            echo "- High/Warning: ${high}" >> /tmp/security-context.md
-            echo "- Medium/Note: ${medium}" >> /tmp/security-context.md
+            echo "- Medium/Warning: ${medium}" >> /tmp/security-context.md
+            echo "- Low/Note: ${low}" >> /tmp/security-context.md
             echo "" >> /tmp/security-context.md
           done
 
@@ -110,8 +115,9 @@ jobs:
       - name: Get PR diff
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_NUMBER: ${{ inputs.pr-number }}
         run: |
-          gh pr diff ${{ inputs.pr-number }} > /tmp/pr-diff.patch
+          gh pr diff "$PR_NUMBER" > /tmp/pr-diff.patch
 
       - name: Claude Security Review
         env:
@@ -159,7 +165,9 @@ jobs:
               }]
             }' > /tmp/claude-payload.json
 
-          REVIEW=$(curl -s \
+          # Capture HTTP status separately so API errors fail visibly rather
+          # than silently producing a false PASS.
+          HTTP_STATUS=$(curl -s -o /tmp/claude-response.json -w "%{http_code}" \
             --connect-timeout 10 \
             --max-time 90 \
             https://api.anthropic.com/v1/messages \
@@ -168,7 +176,13 @@ jobs:
             -H "anthropic-version: 2023-06-01" \
             --data-binary @/tmp/claude-payload.json)
 
-          REVIEW_TEXT=$(echo "$REVIEW" | jq -r '.content[0].text // "Error: could not parse Claude response"')
+          if [ "$HTTP_STATUS" != "200" ]; then
+            echo "Claude API returned HTTP ${HTTP_STATUS}:"
+            cat /tmp/claude-response.json
+            exit 1
+          fi
+
+          REVIEW_TEXT=$(jq -r '.content[0].text // "Error: could not parse Claude response"' /tmp/claude-response.json)
           echo "$REVIEW_TEXT" > /tmp/security-review.md
 
           if grep -q "^VERDICT: FAIL" /tmp/security-review.md; then
@@ -182,6 +196,7 @@ jobs:
       - name: Post security review to PR
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_NUMBER: ${{ inputs.pr-number }}
         run: |
           case "$OVERALL_STATUS" in
             FAIL)     BADGE="❌ FAIL — blocking security issues found" ;;
@@ -198,18 +213,19 @@ jobs:
             echo "|------|--------|:--------:|:----:|:------:|:---:|:----:|"
 
             # SARIF-based scans (Snyk Code)
+            # SARIF level mapping: error → critical/high, warning → medium, note → low
             for sarif in /tmp/scan-results/*.sarif; do
               [ -f "$sarif" ] || continue
               filename=$(basename "$sarif" .sarif)
-              s_error=$(jq '[.runs[].results[] | select(.level == "error")]   | length' "$sarif" 2>/dev/null || echo "0")
-              s_warn=$( jq '[.runs[].results[] | select(.level == "warning")] | length' "$sarif" 2>/dev/null || echo "0")
-              s_note=$( jq '[.runs[].results[] | select(.level == "note")]    | length' "$sarif" 2>/dev/null || echo "0")
-              s_total=$(jq '[.runs[].results[]] | length' "$sarif" 2>/dev/null || echo "0")
-              if   [ "$s_error" -gt 0 ]; then status="❌"
-              elif [ "$s_total" -gt 0 ]; then status="⚠️"
-              else                             status="✅ Clean"
+              s_crit_high=$(jq '[.runs[].results[] | select(.level == "error")]   | length' "$sarif" 2>/dev/null || echo "0")
+              s_med=$(      jq '[.runs[].results[] | select(.level == "warning")] | length' "$sarif" 2>/dev/null || echo "0")
+              s_low=$(      jq '[.runs[].results[] | select(.level == "note")]    | length' "$sarif" 2>/dev/null || echo "0")
+              s_total=$(    jq '[.runs[].results[]] | length'                     "$sarif" 2>/dev/null || echo "0")
+              if   [ "$s_crit_high" -gt 0 ]; then status="❌"
+              elif [ "$s_total"     -gt 0 ]; then status="⚠️"
+              else                               status="✅ Clean"
               fi
-              echo "| ${filename} | ${status} | ${s_error} | — | ${s_warn} | ${s_note} | — |"
+              echo "| ${filename} | ${status} | ${s_crit_high} | — | ${s_med} | ${s_low} | — |"
             done
 
             # JSON-based scans (Snyk Container)
@@ -241,5 +257,4 @@ jobs:
             echo "• Artefacts: Full scan reports attached to this workflow run</sub>"
           } > /tmp/pr-comment.md
 
-          gh pr comment ${{ inputs.pr-number }} \
-            --body-file /tmp/pr-comment.md
+          gh pr comment "$PR_NUMBER" --body-file /tmp/pr-comment.md
