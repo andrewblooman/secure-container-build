@@ -197,38 +197,49 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          SCAN_SUMMARY=$(cat /tmp/security-context.md)
-          # Truncate to 50KB to stay within Claude's context window;
-          # if the diff is larger, the AI review covers only the first portion.
-          PR_DIFF=$(head -c 50000 /tmp/pr-diff.patch)
-          # CLAUDE.md contains the project security policy. If absent, the
-          # agent proceeds without project-specific policy context.
-          CLAUDE_MD=$(cat CLAUDE.md 2>/dev/null || echo "No CLAUDE.md found")
+          # Extract compact vulnerability list from JSON (avoids arg-list-too-long).
+          # Pulls only the fields Claude needs: id, severity, title, package, version, fixedIn.
+          {
+            for json in /tmp/scan-results/*.json; do
+              [ -f "$json" ] || continue
+              echo "=== $(basename "$json") ==="
+              jq -r '
+                .vulnerabilities[]
+                | "[\(.severity | ascii_upcase)] \(.id) — \(.title) | pkg: \(.packageName)@\(.version) | fix: \(.fixedIn[0] // "none")"
+              ' "$json" 2>/dev/null || echo "(no vulnerabilities)"
+            done
+            for sarif in /tmp/scan-results/*.sarif; do
+              [ -f "$sarif" ] || continue
+              echo "=== $(basename "$sarif") ==="
+              jq -r '
+                .runs[].results[]
+                | "[\(.level | ascii_upcase)] \(.ruleId) — \(.message.text[:120])"
+              ' "$sarif" 2>/dev/null || echo "(no findings)"
+            done
+          } > /tmp/scan-details-compact.txt
 
-          # Load scan details for the AI to analyse (SARIF + JSON)
-          SCAN_DETAILS=""
-          for f in /tmp/scan-results/*.sarif /tmp/scan-results/*.json; do
-            [ -f "$f" ] || continue
-            filename=$(basename "$f")
-            SCAN_DETAILS="${SCAN_DETAILS}\n\n--- ${filename} ---\n$(cat "$f")"
-          done
+          # Write all large inputs to files; use --rawfile so jq reads them
+          # directly without hitting the shell argument size limit.
+          cat /tmp/security-context.md        > /tmp/claude-scan-summary.txt
+          head -c 30000 /tmp/pr-diff.patch    > /tmp/claude-pr-diff.txt
+          cat CLAUDE.md 2>/dev/null           > /tmp/claude-policy.txt || echo "No CLAUDE.md" > /tmp/claude-policy.txt
 
           REVIEW=$(curl -s https://api.anthropic.com/v1/messages \
             -H "content-type: application/json" \
             -H "x-api-key: ${ANTHROPIC_API_KEY}" \
             -H "anthropic-version: 2023-06-01" \
             -d "$(jq -n \
-              --arg scan_summary "$SCAN_SUMMARY" \
-              --arg pr_diff "$PR_DIFF" \
-              --arg claude_md "$CLAUDE_MD" \
-              --arg scan_details "$SCAN_DETAILS" \
+              --rawfile scan_summary  /tmp/claude-scan-summary.txt \
+              --rawfile pr_diff       /tmp/claude-pr-diff.txt \
+              --rawfile claude_md     /tmp/claude-policy.txt \
+              --rawfile scan_details  /tmp/scan-details-compact.txt \
               '{
                 model: "claude-sonnet-4-6",
                 max_tokens: 4096,
                 system: "You are a Security Engineer Agent reviewing a pull request. Analyse the scan results in the context of the code changes and produce a concise, structured review.\n\nYour response MUST start with one of these three verdict lines (exactly as written):\n- VERDICT: PASS\n- VERDICT: ADVISORY\n- VERDICT: FAIL\n\nUse FAIL only for critical or high severity findings introduced by this PR.\nUse ADVISORY for pre-existing issues or low/medium findings worth noting.\nUse PASS when no meaningful security issues are present.\n\nThen include:\n- A one-sentence summary of the verdict\n- Bullet list of relevant findings (severity, CVE/rule ID, description) — omit if none\n- Whether each finding is net-new (from this PR) or pre-existing\n- Recommended remediation if applicable\n\nEnd with exactly one of:\n✅ **Security Agent Sign-Off** — No blocking security issues identified.\n⚠️ **Security Agent Advisory** — Non-blocking issues identified. Review recommended.\n❌ **Security Agent Block** — Critical security issues must be resolved before merge.",
                 messages: [{
                   role: "user",
-                  content: ("## Project Security Policy\n\n" + $claude_md + "\n\n## Scan Results Summary\n\n" + $scan_summary + "\n\n## Full Scan Details\n\n" + $scan_details + "\n\n## PR Diff\n\n```patch\n" + $pr_diff + "\n```\n\nProvide your security verdict and assessment.")
+                  content: ("## Project Security Policy\n\n" + $claude_md + "\n\n## Scan Results Summary\n\n" + $scan_summary + "\n\n## Vulnerability Details\n\n" + $scan_details + "\n\n## PR Diff\n\n```patch\n" + $pr_diff + "\n```\n\nProvide your security verdict and assessment.")
                 }]
               }'
           )")
