@@ -68,6 +68,22 @@ jobs:
           command: code test
           args: --sarif-file-output=snyk-code.sarif
 
+      - name: Create clean SARIF if no findings
+        # snyk code test only writes the file when issues are found;
+        # create a valid empty SARIF so the artifact is always present.
+        if: always() && hashFiles('snyk-code.sarif') == ''
+        run: |
+          cat > snyk-code.sarif <<'EOF'
+          {
+            "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+            "version": "2.1.0",
+            "runs": [{
+              "tool": { "driver": { "name": "Snyk Code", "rules": [] } },
+              "results": []
+            }]
+          }
+          EOF
+
       - name: Upload Snyk Code SARIF
         uses: github/codeql-action/upload-sarif@v4
         if: always() && hashFiles('snyk-code.sarif') != ''
