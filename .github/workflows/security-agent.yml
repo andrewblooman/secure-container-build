@@ -201,7 +201,8 @@ jobs:
             echo "" >> /tmp/security-context.md
           done
 
-          # Load the project threat model if it exists
+          # Optionally include a threat model (JSON object with assets,
+          # threats, and mitigations) for richer AI context.
           if [ -f "security/threats/threat-model.json" ]; then
             echo "### Threat Model Context" >> /tmp/security-context.md
             echo '```json' >> /tmp/security-context.md
@@ -226,7 +227,11 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           SCAN_SUMMARY=$(cat /tmp/security-context.md)
-          PR_DIFF=$(head -c 50000 /tmp/pr-diff.patch)  # Truncate large diffs
+          # Truncate to 50KB to stay within Claude's context window;
+          # if the diff is larger, the AI review covers only the first portion.
+          PR_DIFF=$(head -c 50000 /tmp/pr-diff.patch)
+          # CLAUDE.md contains the project security policy. If absent, the
+          # agent proceeds without project-specific policy context.
           CLAUDE_MD=$(cat CLAUDE.md 2>/dev/null || echo "No CLAUDE.md found")
 
           # Load SARIF details for the AI to analyse

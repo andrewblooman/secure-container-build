@@ -180,6 +180,12 @@ The workflow implements several security controls:
 - Repository owner validation can be added to prevent unauthorized runs
 - Secrets are only accessible to authorized workflows
 
+### Optional Configuration Files
+
+The Security Engineer Agent workflow can optionally use:
+- **`CLAUDE.md`** — Project security policy document. If present in the repo root, its contents are provided to the AI reviewer as context for evaluating findings.
+- **`security/threats/threat-model.json`** — A JSON threat model (assets, threats, mitigations). If present, it enriches the AI review with project-specific threat context.
+
 ## Security Features
 
 This pipeline implements several container security best practices:
