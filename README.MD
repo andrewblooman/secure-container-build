@@ -5,7 +5,8 @@ This project demonstrates a secure container build pipeline that implements mode
 ## Features
 
 - 🔨 Builds a Python Flask application container image with OCI standard labels
-- 🔍 Performs vulnerability scanning using Grype
+- 🔍 Performs vulnerability scanning using Snyk (SAST, SCA, and Container)
+- 🤖 AI-powered security review via Security Engineer Agent
 - 📝 Generates Software Bill of Materials (SBOM) using Syft
 - ✍️ Signs the container image using Cosign with keyless signing
 - 📦 Publishes the image to Docker Hub
@@ -21,17 +22,24 @@ This project demonstrates a secure container build pipeline that implements mode
    - Installs required Python dependencies
    - Builds Flask application
 
-2. **Security Scanning**
-   - Scans container image using Grype
-   - Checks for HIGH and CRITICAL vulnerabilities
-   - Identifies known CVEs in dependencies
+2. **Security Scanning (on pull requests)**
+   - **Snyk Code (SAST)**: Static application security testing on source code
+   - **Snyk Container**: Scans the built container image for vulnerabilities
+   - **Snyk Open Source (SCA)**: Analyses dependencies for known vulnerabilities
+   - All scan results are uploaded as SARIF to GitHub Code Scanning
 
-3. **SBOM Generation**
+3. **Security Engineer Agent (AI Review)**
+   - Collects all Snyk scan results after scans complete
+   - Sends findings and PR diff to Claude for contextual review
+   - Posts a structured security review comment on the PR
+   - Provides severity assessment: PASS, ADVISORY, or FAIL
+
+4. **SBOM Generation**
    - Creates Software Bill of Materials using Syft
    - Generates SPDX JSON format
    - Uploads SBOM as artifact for attestation
 
-4. **Image Signing & Attestation**
+5. **Image Signing & Attestation**
    - Uses Cosign for keyless signing via Sigstore
    - Creates cryptographically signed SBOM attestation
    - Generates SLSA-style provenance attestation
@@ -46,6 +54,8 @@ This project demonstrates a secure container build pipeline that implements mode
 - Required secrets configured in GitHub repository:
   - `DOCKERHUB_USERNAME`: Your Docker Hub username
   - `DOCKERHUB_TOKEN`: Your Docker Hub access token (create at https://hub.docker.com/settings/security)
+  - `SNYK_TOKEN`: Your Snyk API token (create at https://app.snyk.io/account)
+  - `ANTHROPIC_API_KEY`: Anthropic API key for the Security Engineer Agent AI review
 
 The workflow automatically uses:
 - `IMAGE_NAME`: andyblooman/secure-container-build
@@ -157,9 +167,10 @@ Expected labels:
 
 ## GitHub Actions Workflow
 
-The pipeline is automated using GitHub Actions and triggers on:
-- Push to main branch
-- Manual workflow dispatch (requires repository write access)
+The pipeline is automated using GitHub Actions:
+
+- **Build, SBOM, Sign, and Attest** (`actions.yml`): Triggers on push to main and manual dispatch. Builds, generates SBOM, signs, and attests the image.
+- **Security Engineer Agent** (`security-agent.yml`): Triggers on pull requests to main. Runs Snyk scans and AI-powered security review.
 
 ### Security Controls
 
@@ -169,11 +180,18 @@ The workflow implements several security controls:
 - Repository owner validation can be added to prevent unauthorized runs
 - Secrets are only accessible to authorized workflows
 
+### Optional Configuration Files
+
+The Security Engineer Agent workflow can optionally use:
+- **`CLAUDE.md`** — Project security policy document. If present in the repo root, its contents are provided to the AI reviewer as context for evaluating findings.
+- **`security/threats/threat-model.json`** — A JSON threat model (assets, threats, mitigations). If present, it enriches the AI review with project-specific threat context.
+
 ## Security Features
 
 This pipeline implements several container security best practices:
 
-- **Vulnerability Scanning**: Identifies known vulnerabilities before deployment
+- **Vulnerability Scanning**: Identifies known vulnerabilities via Snyk (SAST, SCA, Container)
+- **AI Security Review**: Claude-powered Security Engineer Agent reviews scan results in PR context
 - **Software Bill of Materials**: Provides transparency of all dependencies
 - **Image Signing**: Cryptographic proof of image authenticity and integrity
 - **Build Provenance**: Complete traceability of build process and materials

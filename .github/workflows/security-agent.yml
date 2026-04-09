@@ -1,0 +1,277 @@
+name: Security Engineer Agent Example
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write
+  actions: read
+
+env:
+  IMAGE_NAME: ${{ github.repository }}
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  # ──────────────────────────────────────────────
+  # Stage 1: Build the container image
+  # ──────────────────────────────────────────────
+  build:
+    name: Build Container Image
+    runs-on: ubuntu-latest
+    outputs:
+      image-ref: ${{ steps.build.outputs.image-ref }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build container image
+        id: build
+        run: |
+          docker build -t ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} .
+          echo "image-ref=${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}" >> "$GITHUB_OUTPUT"
+
+      - name: Save image as artefact
+        run: |
+          docker save ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} \
+            -o /tmp/container-image.tar
+
+      - name: Upload image artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-image
+          path: /tmp/container-image.tar
+          retention-days: 1
+
+  # ──────────────────────────────────────────────
+  # Stage 2: Snyk Code scan (SAST)
+  # ──────────────────────────────────────────────
+  snyk-code-scan:
+    name: Snyk Code Scan (SAST)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Snyk Code scan
+        uses: snyk/actions/node@master
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          command: code test
+          args: --sarif-file-output=snyk-code.sarif
+
+      - name: Upload Snyk Code SARIF
+        uses: github/codeql-action/upload-sarif@v4
+        if: always() && hashFiles('snyk-code.sarif') != ''
+        with:
+          sarif_file: snyk-code.sarif
+          category: snyk-code
+
+      - name: Upload scan results as artefact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: snyk-code-results
+          path: snyk-code.sarif
+
+  # ──────────────────────────────────────────────
+  # Stage 3: Snyk Container scan
+  # ──────────────────────────────────────────────
+  snyk-container-scan:
+    name: Snyk Container Scan
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download container image
+        uses: actions/download-artifact@v4
+        with:
+          name: container-image
+          path: /tmp
+
+      - name: Load container image
+        run: docker load -i /tmp/container-image.tar
+
+      - name: Run Snyk Container scan
+        uses: snyk/actions/docker@master
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          image: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          args: --file=Dockerfile --sarif-file-output=snyk-container.sarif
+
+      - name: Upload Snyk Container SARIF
+        uses: github/codeql-action/upload-sarif@v4
+        if: always() && hashFiles('snyk-container.sarif') != ''
+        with:
+          sarif_file: snyk-container.sarif
+          category: snyk-container
+
+      - name: Upload scan results as artefact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: snyk-container-results
+          path: snyk-container.sarif
+
+  # ──────────────────────────────────────────────
+  # Stage 5: Security Engineer Agent - AI Review
+  # ──────────────────────────────────────────────
+  security-agent-review:
+    name: Security Engineer Agent
+    runs-on: ubuntu-latest
+    needs:
+      - snyk-code-scan
+      - snyk-container-scan
+    if: always()
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all scan artefacts
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/scan-results
+          pattern: snyk-*-results
+          merge-multiple: true
+
+      - name: Prepare security context
+        id: context
+        run: |
+          # Combine all SARIF results into a single summary
+          echo "## Scan Results Summary" > /tmp/security-context.md
+          echo "" >> /tmp/security-context.md
+
+          for sarif in /tmp/scan-results/*.sarif; do
+            filename=$(basename "$sarif" .sarif)
+            echo "### ${filename}" >> /tmp/security-context.md
+
+            # Extract results count and severity breakdown
+            results=$(jq '[.runs[].results[]] | length' "$sarif" 2>/dev/null || echo "0")
+            critical=$(jq '[.runs[].results[] | select(.level == "error")] | length' "$sarif" 2>/dev/null || echo "0")
+            high=$(jq '[.runs[].results[] | select(.level == "warning")] | length' "$sarif" 2>/dev/null || echo "0")
+            medium=$(jq '[.runs[].results[] | select(.level == "note")] | length' "$sarif" 2>/dev/null || echo "0")
+
+            echo "- Total findings: ${results}" >> /tmp/security-context.md
+            echo "- Critical/Error: ${critical}" >> /tmp/security-context.md
+            echo "- High/Warning: ${high}" >> /tmp/security-context.md
+            echo "- Medium/Note: ${medium}" >> /tmp/security-context.md
+            echo "" >> /tmp/security-context.md
+          done
+
+          # Optionally include a threat model (JSON object with assets,
+          # threats, and mitigations) for richer AI context.
+          if [ -f "security/threats/threat-model.json" ]; then
+            echo "### Threat Model Context" >> /tmp/security-context.md
+            echo '```json' >> /tmp/security-context.md
+            cat security/threats/threat-model.json >> /tmp/security-context.md
+            echo '```' >> /tmp/security-context.md
+          fi
+
+          # Capture the PR diff for context
+          echo "context-file=/tmp/security-context.md" >> "$GITHUB_OUTPUT"
+
+      - name: Get PR diff
+        id: diff
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr diff ${{ github.event.pull_request.number }} > /tmp/pr-diff.patch
+
+      # ── Claude Code as Security Reviewer ──
+      - name: Claude Security Review
+        id: claude-review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          SCAN_SUMMARY=$(cat /tmp/security-context.md)
+          # Truncate to 50KB to stay within Claude's context window;
+          # if the diff is larger, the AI review covers only the first portion.
+          PR_DIFF=$(head -c 50000 /tmp/pr-diff.patch)
+          # CLAUDE.md contains the project security policy. If absent, the
+          # agent proceeds without project-specific policy context.
+          CLAUDE_MD=$(cat CLAUDE.md 2>/dev/null || echo "No CLAUDE.md found")
+
+          # Load SARIF details for the AI to analyse
+          SARIF_DETAILS=""
+          for sarif in /tmp/scan-results/*.sarif; do
+            filename=$(basename "$sarif")
+            SARIF_DETAILS="${SARIF_DETAILS}\n\n--- ${filename} ---\n$(cat "$sarif")"
+          done
+
+          REVIEW=$(curl -s https://api.anthropic.com/v1/messages \
+            -H "content-type: application/json" \
+            -H "x-api-key: ${ANTHROPIC_API_KEY}" \
+            -H "anthropic-version: 2023-06-01" \
+            -d "$(jq -n \
+              --arg scan_summary "$SCAN_SUMMARY" \
+              --arg pr_diff "$PR_DIFF" \
+              --arg claude_md "$CLAUDE_MD" \
+              --arg sarif "$SARIF_DETAILS" \
+              '{
+                model: "claude-sonnet-4-6",
+                max_tokens: 4096,
+                system: "You are a Security Engineer Agent reviewing a pull request. Your role is to analyse security scan results in the context of the code changes and the project security policy, then provide a structured security review.\n\nYour review MUST include:\n1. A severity assessment: PASS, ADVISORY, or FAIL\n2. A summary of findings relevant to the PR changes\n3. Whether findings are net-new (introduced by this PR) or pre-existing\n4. Recommended actions if any\n5. Your sign-off statement\n\nFormat your response in Markdown suitable for a GitHub PR comment.\n\nIf there are no critical or high findings related to the PR changes, sign off with:\n\"✅ **Security Agent Sign-Off** - No blocking security issues identified.\"\n\nIf there are findings that need attention:\n\"⚠️ **Security Agent Advisory** - Non-blocking issues identified. Review recommended.\"\n\nIf there are critical findings:\n\"❌ **Security Agent Block** - Critical security issues must be resolved before merge.\"",
+                messages: [{
+                  role: "user",
+                  content: ("## Project Security Policy\n\n" + $claude_md + "\n\n## Scan Results\n\n" + $scan_summary + "\n\n## SARIF Details\n\n" + $sarif + "\n\n## PR Diff\n\n```patch\n" + $pr_diff + "\n```\n\nPlease review the security scan results in the context of this PR and provide your assessment.")
+                }]
+              }'
+          )")
+
+          # Extract the review text
+          REVIEW_TEXT=$(echo "$REVIEW" | jq -r '.content[0].text')
+          echo "$REVIEW_TEXT" > /tmp/security-review.md
+
+      - name: Post security review to PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Build the PR comment
+          {
+            echo "## 🔒 Security Engineer Agent Review"
+            echo ""
+            echo "| Scan | Status |"
+            echo "|------|--------|"
+
+            # Check each scan result
+            for sarif in /tmp/scan-results/*.sarif; do
+              filename=$(basename "$sarif" .sarif)
+              results=$(jq '[.runs[].results[]] | length' "$sarif" 2>/dev/null || echo "0")
+              critical=$(jq '[.runs[].results[] | select(.level == "error")] | length' "$sarif" 2>/dev/null || echo "0")
+
+              if [ "$critical" -gt 0 ]; then
+                echo "| ${filename} | ❌ ${results} findings (${critical} critical) |"
+              elif [ "$results" -gt 0 ]; then
+                echo "| ${filename} | ⚠️ ${results} findings |"
+              else
+                echo "| ${filename} | ✅ Clean |"
+              fi
+            done
+
+            echo ""
+            echo "---"
+            echo ""
+            cat /tmp/security-review.md
+            echo ""
+            echo "---"
+            echo ""
+            echo "<sub>🤖 Automated review by Security Engineer Agent"
+            echo "• Scans: Snyk Code (SAST) · Snyk Container"
+            echo "• Review: Claude · $(date -u '+%Y-%m-%d %H:%M UTC')"
+            echo "• Artefacts: Full SARIF reports attached to this workflow run</sub>"
+          } > /tmp/pr-comment.md
+
+          gh pr comment ${{ github.event.pull_request.number }} \
+            --body-file /tmp/pr-comment.md
