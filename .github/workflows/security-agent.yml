@@ -105,30 +105,16 @@ jobs:
         run: npm install -g snyk
 
       - name: Run Snyk Container scan
-        run: snyk container test ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} --file=Dockerfile --sarif-file-output=snyk-container.sarif || true
+        run: snyk container test ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} --file=Dockerfile --exclude-base-image-vulns --json-file-output=snyk-container.json || true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-
-      - name: Fix null security-severity in SARIF
-        if: always() && hashFiles('snyk-container.sarif') != ''
-        run: |
-          jq 'walk(if type == "object" and has("security-severity") and .["security-severity"] == null then .["security-severity"] = "0.0" else . end)' \
-            snyk-container.sarif > snyk-container-fixed.sarif
-          mv snyk-container-fixed.sarif snyk-container.sarif
-
-      - name: Upload Snyk Container SARIF
-        uses: github/codeql-action/upload-sarif@v4
-        if: always() && hashFiles('snyk-container.sarif') != ''
-        with:
-          sarif_file: snyk-container.sarif
-          category: snyk-container
 
       - name: Upload scan results as artefact
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: snyk-container-results
-          path: snyk-container.sarif
+          path: snyk-container.json
 
   # ──────────────────────────────────────────────
   # Stage 5: Security Engineer Agent - AI Review
@@ -154,24 +140,38 @@ jobs:
       - name: Prepare security context
         id: context
         run: |
-          # Combine all SARIF results into a single summary
           echo "## Scan Results Summary" > /tmp/security-context.md
           echo "" >> /tmp/security-context.md
 
+          # Parse SARIF from Snyk Code
           for sarif in /tmp/scan-results/*.sarif; do
+            [ -f "$sarif" ] || continue
             filename=$(basename "$sarif" .sarif)
             echo "### ${filename}" >> /tmp/security-context.md
-
-            # Extract results count and severity breakdown
             results=$(jq '[.runs[].results[]] | length' "$sarif" 2>/dev/null || echo "0")
             critical=$(jq '[.runs[].results[] | select(.level == "error")] | length' "$sarif" 2>/dev/null || echo "0")
             high=$(jq '[.runs[].results[] | select(.level == "warning")] | length' "$sarif" 2>/dev/null || echo "0")
             medium=$(jq '[.runs[].results[] | select(.level == "note")] | length' "$sarif" 2>/dev/null || echo "0")
-
             echo "- Total findings: ${results}" >> /tmp/security-context.md
             echo "- Critical/Error: ${critical}" >> /tmp/security-context.md
             echo "- High/Warning: ${high}" >> /tmp/security-context.md
             echo "- Medium/Note: ${medium}" >> /tmp/security-context.md
+            echo "" >> /tmp/security-context.md
+          done
+
+          # Parse JSON from Snyk Container
+          for json in /tmp/scan-results/*.json; do
+            [ -f "$json" ] || continue
+            filename=$(basename "$json" .json)
+            echo "### ${filename}" >> /tmp/security-context.md
+            critical=$(jq '[.vulnerabilities[] | select(.severity == "critical")] | length' "$json" 2>/dev/null || echo "0")
+            high=$(jq '[.vulnerabilities[] | select(.severity == "high")] | length' "$json" 2>/dev/null || echo "0")
+            medium=$(jq '[.vulnerabilities[] | select(.severity == "medium")] | length' "$json" 2>/dev/null || echo "0")
+            low=$(jq '[.vulnerabilities[] | select(.severity == "low")] | length' "$json" 2>/dev/null || echo "0")
+            echo "- Critical: ${critical}" >> /tmp/security-context.md
+            echo "- High: ${high}" >> /tmp/security-context.md
+            echo "- Medium: ${medium}" >> /tmp/security-context.md
+            echo "- Low: ${low}" >> /tmp/security-context.md
             echo "" >> /tmp/security-context.md
           done
 
@@ -183,9 +183,6 @@ jobs:
             cat security/threats/threat-model.json >> /tmp/security-context.md
             echo '```' >> /tmp/security-context.md
           fi
-
-          # Capture the PR diff for context
-          echo "context-file=/tmp/security-context.md" >> "$GITHUB_OUTPUT"
 
       - name: Get PR diff
         id: diff
@@ -208,11 +205,12 @@ jobs:
           # agent proceeds without project-specific policy context.
           CLAUDE_MD=$(cat CLAUDE.md 2>/dev/null || echo "No CLAUDE.md found")
 
-          # Load SARIF details for the AI to analyse
-          SARIF_DETAILS=""
-          for sarif in /tmp/scan-results/*.sarif; do
-            filename=$(basename "$sarif")
-            SARIF_DETAILS="${SARIF_DETAILS}\n\n--- ${filename} ---\n$(cat "$sarif")"
+          # Load scan details for the AI to analyse (SARIF + JSON)
+          SCAN_DETAILS=""
+          for f in /tmp/scan-results/*.sarif /tmp/scan-results/*.json; do
+            [ -f "$f" ] || continue
+            filename=$(basename "$f")
+            SCAN_DETAILS="${SCAN_DETAILS}\n\n--- ${filename} ---\n$(cat "$f")"
           done
 
           REVIEW=$(curl -s https://api.anthropic.com/v1/messages \
@@ -223,43 +221,75 @@ jobs:
               --arg scan_summary "$SCAN_SUMMARY" \
               --arg pr_diff "$PR_DIFF" \
               --arg claude_md "$CLAUDE_MD" \
-              --arg sarif "$SARIF_DETAILS" \
+              --arg scan_details "$SCAN_DETAILS" \
               '{
                 model: "claude-sonnet-4-6",
                 max_tokens: 4096,
-                system: "You are a Security Engineer Agent reviewing a pull request. Your role is to analyse security scan results in the context of the code changes and the project security policy, then provide a structured security review.\n\nYour review MUST include:\n1. A severity assessment: PASS, ADVISORY, or FAIL\n2. A summary of findings relevant to the PR changes\n3. Whether findings are net-new (introduced by this PR) or pre-existing\n4. Recommended actions if any\n5. Your sign-off statement\n\nFormat your response in Markdown suitable for a GitHub PR comment.\n\nIf there are no critical or high findings related to the PR changes, sign off with:\n\"✅ **Security Agent Sign-Off** - No blocking security issues identified.\"\n\nIf there are findings that need attention:\n\"⚠️ **Security Agent Advisory** - Non-blocking issues identified. Review recommended.\"\n\nIf there are critical findings:\n\"❌ **Security Agent Block** - Critical security issues must be resolved before merge.\"",
+                system: "You are a Security Engineer Agent reviewing a pull request. Analyse the scan results in the context of the code changes and produce a concise, structured review.\n\nYour response MUST start with one of these three verdict lines (exactly as written):\n- VERDICT: PASS\n- VERDICT: ADVISORY\n- VERDICT: FAIL\n\nUse FAIL only for critical or high severity findings introduced by this PR.\nUse ADVISORY for pre-existing issues or low/medium findings worth noting.\nUse PASS when no meaningful security issues are present.\n\nThen include:\n- A one-sentence summary of the verdict\n- Bullet list of relevant findings (severity, CVE/rule ID, description) — omit if none\n- Whether each finding is net-new (from this PR) or pre-existing\n- Recommended remediation if applicable\n\nEnd with exactly one of:\n✅ **Security Agent Sign-Off** — No blocking security issues identified.\n⚠️ **Security Agent Advisory** — Non-blocking issues identified. Review recommended.\n❌ **Security Agent Block** — Critical security issues must be resolved before merge.",
                 messages: [{
                   role: "user",
-                  content: ("## Project Security Policy\n\n" + $claude_md + "\n\n## Scan Results\n\n" + $scan_summary + "\n\n## SARIF Details\n\n" + $sarif + "\n\n## PR Diff\n\n```patch\n" + $pr_diff + "\n```\n\nPlease review the security scan results in the context of this PR and provide your assessment.")
+                  content: ("## Project Security Policy\n\n" + $claude_md + "\n\n## Scan Results Summary\n\n" + $scan_summary + "\n\n## Full Scan Details\n\n" + $scan_details + "\n\n## PR Diff\n\n```patch\n" + $pr_diff + "\n```\n\nProvide your security verdict and assessment.")
                 }]
               }'
           )")
 
-          # Extract the review text
-          REVIEW_TEXT=$(echo "$REVIEW" | jq -r '.content[0].text')
+          REVIEW_TEXT=$(echo "$REVIEW" | jq -r '.content[0].text // "Error: could not parse Claude response"')
           echo "$REVIEW_TEXT" > /tmp/security-review.md
+
+          # Derive a simple pass/fail badge from the verdict line
+          if grep -q "^VERDICT: FAIL" /tmp/security-review.md; then
+            echo "OVERALL_STATUS=FAIL" >> "$GITHUB_ENV"
+          elif grep -q "^VERDICT: ADVISORY" /tmp/security-review.md; then
+            echo "OVERALL_STATUS=ADVISORY" >> "$GITHUB_ENV"
+          else
+            echo "OVERALL_STATUS=PASS" >> "$GITHUB_ENV"
+          fi
 
       - name: Post security review to PR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Build the PR comment
+          # Determine top-level badge
+          case "$OVERALL_STATUS" in
+            FAIL)     BADGE="❌ FAIL — blocking security issues found" ;;
+            ADVISORY) BADGE="⚠️ ADVISORY — non-blocking issues found" ;;
+            *)        BADGE="✅ PASS — no blocking security issues" ;;
+          esac
+
           {
             echo "## 🔒 Security Engineer Agent Review"
+            echo ""
+            echo "**Overall verdict: ${BADGE}**"
             echo ""
             echo "| Scan | Status |"
             echo "|------|--------|"
 
-            # Check each scan result
+            # SARIF-based scans (Snyk Code)
             for sarif in /tmp/scan-results/*.sarif; do
+              [ -f "$sarif" ] || continue
               filename=$(basename "$sarif" .sarif)
               results=$(jq '[.runs[].results[]] | length' "$sarif" 2>/dev/null || echo "0")
               critical=$(jq '[.runs[].results[] | select(.level == "error")] | length' "$sarif" 2>/dev/null || echo "0")
-
               if [ "$critical" -gt 0 ]; then
                 echo "| ${filename} | ❌ ${results} findings (${critical} critical) |"
               elif [ "$results" -gt 0 ]; then
                 echo "| ${filename} | ⚠️ ${results} findings |"
+              else
+                echo "| ${filename} | ✅ Clean |"
+              fi
+            done
+
+            # JSON-based scans (Snyk Container)
+            for json in /tmp/scan-results/*.json; do
+              [ -f "$json" ] || continue
+              filename=$(basename "$json" .json)
+              critical=$(jq '[.vulnerabilities[] | select(.severity == "critical")] | length' "$json" 2>/dev/null || echo "0")
+              high=$(jq '[.vulnerabilities[] | select(.severity == "high")] | length' "$json" 2>/dev/null || echo "0")
+              total=$(jq '.vulnerabilities | length' "$json" 2>/dev/null || echo "0")
+              if [ "$critical" -gt 0 ] || [ "$high" -gt 0 ]; then
+                echo "| ${filename} | ❌ ${total} findings (${critical} critical, ${high} high) |"
+              elif [ "$total" -gt 0 ]; then
+                echo "| ${filename} | ⚠️ ${total} findings |"
               else
                 echo "| ${filename} | ✅ Clean |"
               fi
@@ -275,7 +305,7 @@ jobs:
             echo "<sub>🤖 Automated review by Security Engineer Agent"
             echo "• Scans: Snyk Code (SAST) · Snyk Container"
             echo "• Review: Claude · $(date -u '+%Y-%m-%d %H:%M UTC')"
-            echo "• Artefacts: Full SARIF reports attached to this workflow run</sub>"
+            echo "• Artefacts: Full scan reports attached to this workflow run</sub>"
           } > /tmp/pr-comment.md
 
           gh pr comment ${{ github.event.pull_request.number }} \
