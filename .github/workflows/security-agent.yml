@@ -59,14 +59,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Install Snyk CLI
+        run: npm install -g snyk
+
       - name: Run Snyk Code scan
-        uses: snyk/actions/node@master
-        continue-on-error: true
+        run: snyk code test --sarif-file-output=snyk-code.sarif || true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          command: code test
-          args: --sarif-file-output=snyk-code.sarif
 
       - name: Upload Snyk Code SARIF
         uses: github/codeql-action/upload-sarif@v4
@@ -102,14 +101,13 @@ jobs:
       - name: Load container image
         run: docker load -i /tmp/container-image.tar
 
+      - name: Install Snyk CLI
+        run: npm install -g snyk
+
       - name: Run Snyk Container scan
-        uses: snyk/actions/docker@master
-        continue-on-error: true
+        run: snyk container test ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} --file=Dockerfile --sarif-file-output=snyk-container.sarif || true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          image: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
-          args: --file=Dockerfile --sarif-file-output=snyk-container.sarif
 
       - name: Upload Snyk Container SARIF
         uses: github/codeql-action/upload-sarif@v4
