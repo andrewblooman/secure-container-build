@@ -241,25 +241,31 @@ jobs:
           head -c 30000 /tmp/pr-diff.patch    > /tmp/claude-pr-diff.txt
           cat CLAUDE.md 2>/dev/null           > /tmp/claude-policy.txt || echo "No CLAUDE.md" > /tmp/claude-policy.txt
 
-          REVIEW=$(curl -s https://api.anthropic.com/v1/messages \
+          # Build the JSON payload to a file to avoid $() subshell hangs
+          # on large payloads and to keep special characters safe.
+          jq -n \
+            --rawfile scan_summary  /tmp/claude-scan-summary.txt \
+            --rawfile pr_diff       /tmp/claude-pr-diff.txt \
+            --rawfile claude_md     /tmp/claude-policy.txt \
+            --rawfile scan_details  /tmp/scan-details-compact.txt \
+            '{
+              model: "claude-sonnet-4-6",
+              max_tokens: 1024,
+              system: "You are a Security Engineer Agent reviewing a pull request. Analyse the scan results in the context of the code changes and produce a concise, structured review.\n\nYour response MUST start with one of these three verdict lines (exactly as written):\n- VERDICT: PASS\n- VERDICT: ADVISORY\n- VERDICT: FAIL\n\nUse FAIL only for critical or high severity findings introduced by this PR.\nUse ADVISORY for pre-existing issues or low/medium findings worth noting.\nUse PASS when no meaningful security issues are present.\n\nFollow the verdict line with:\n- A one-sentence summary\n\nIf there are HIGH or CRITICAL findings:\n- List each one: severity, CVE/rule ID, package/location, description, whether net-new or pre-existing, recommended fix\n\nIf there are NO high or critical findings:\n- Do NOT list individual low/medium findings. Instead write one short paragraph: total finding counts by severity, and a brief plain-English risk assessment (e.g. what the exposure means in practice and why it is not blocking).\n\nEnd with exactly one of:\n✅ **Security Agent Sign-Off** — No blocking security issues identified.\n⚠️ **Security Agent Advisory** — Non-blocking issues identified. Review recommended.\n❌ **Security Agent Block** — Critical security issues must be resolved before merge.",
+              messages: [{
+                role: "user",
+                content: ("## Project Security Policy\n\n" + $claude_md + "\n\n## Scan Results Summary\n\n" + $scan_summary + "\n\n## Vulnerability Details\n\n" + $scan_details + "\n\n## PR Diff\n\n```patch\n" + $pr_diff + "\n```\n\nProvide your security verdict and assessment.")
+              }]
+            }' > /tmp/claude-payload.json
+
+          REVIEW=$(curl -s \
+            --connect-timeout 10 \
+            --max-time 90 \
+            https://api.anthropic.com/v1/messages \
             -H "content-type: application/json" \
             -H "x-api-key: ${ANTHROPIC_API_KEY}" \
             -H "anthropic-version: 2023-06-01" \
-            -d "$(jq -n \
-              --rawfile scan_summary  /tmp/claude-scan-summary.txt \
-              --rawfile pr_diff       /tmp/claude-pr-diff.txt \
-              --rawfile claude_md     /tmp/claude-policy.txt \
-              --rawfile scan_details  /tmp/scan-details-compact.txt \
-              '{
-                model: "claude-sonnet-4-6",
-                max_tokens: 4096,
-                system: "You are a Security Engineer Agent reviewing a pull request. Analyse the scan results in the context of the code changes and produce a concise, structured review.\n\nYour response MUST start with one of these three verdict lines (exactly as written):\n- VERDICT: PASS\n- VERDICT: ADVISORY\n- VERDICT: FAIL\n\nUse FAIL only for critical or high severity findings introduced by this PR.\nUse ADVISORY for pre-existing issues or low/medium findings worth noting.\nUse PASS when no meaningful security issues are present.\n\nFollow the verdict line with:\n- A one-sentence summary\n\nIf there are HIGH or CRITICAL findings:\n- List each one: severity, CVE/rule ID, package/location, description, whether net-new or pre-existing, recommended fix\n\nIf there are NO high or critical findings:\n- Do NOT list individual low/medium findings. Instead write one short paragraph: total finding counts by severity, and a brief plain-English risk assessment (e.g. what the exposure means in practice and why it is not blocking).\n\nEnd with exactly one of:\n✅ **Security Agent Sign-Off** — No blocking security issues identified.\n⚠️ **Security Agent Advisory** — Non-blocking issues identified. Review recommended.\n❌ **Security Agent Block** — Critical security issues must be resolved before merge.",
-                messages: [{
-                  role: "user",
-                  content: ("## Project Security Policy\n\n" + $claude_md + "\n\n## Scan Results Summary\n\n" + $scan_summary + "\n\n## Vulnerability Details\n\n" + $scan_details + "\n\n## PR Diff\n\n```patch\n" + $pr_diff + "\n```\n\nProvide your security verdict and assessment.")
-                }]
-              }'
-          )")
+            --data-binary @/tmp/claude-payload.json)
 
           REVIEW_TEXT=$(echo "$REVIEW" | jq -r '.content[0].text // "Error: could not parse Claude response"')
           echo "$REVIEW_TEXT" > /tmp/security-review.md
