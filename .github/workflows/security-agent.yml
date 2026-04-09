@@ -68,6 +68,22 @@ jobs:
           command: code test
           args: --sarif-file-output=snyk-code.sarif
 
+      - name: Create clean SARIF if no findings
+        # snyk code test only writes the file when issues are found;
+        # create a valid empty SARIF so the artifact is always present.
+        if: always() && hashFiles('snyk-code.sarif') == ''
+        run: |
+          cat > snyk-code.sarif <<'EOF'
+          {
+            "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+            "version": "2.1.0",
+            "runs": [{
+              "tool": { "driver": { "name": "Snyk Code", "rules": [] } },
+              "results": []
+            }]
+          }
+          EOF
+
       - name: Upload Snyk Code SARIF
         uses: github/codeql-action/upload-sarif@v4
         if: always() && hashFiles('snyk-code.sarif') != ''
@@ -102,28 +118,20 @@ jobs:
       - name: Load container image
         run: docker load -i /tmp/container-image.tar
 
+      - name: Install Snyk CLI
+        run: npm install -g snyk
+
       - name: Run Snyk Container scan
-        uses: snyk/actions/docker@master
-        continue-on-error: true
+        run: snyk container test ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} --file=Dockerfile --exclude-base-image-vulns --json-file-output=snyk-container.json || true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          image: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
-          args: --file=Dockerfile --sarif-file-output=snyk-container.sarif
-
-      - name: Upload Snyk Container SARIF
-        uses: github/codeql-action/upload-sarif@v4
-        if: always() && hashFiles('snyk-container.sarif') != ''
-        with:
-          sarif_file: snyk-container.sarif
-          category: snyk-container
 
       - name: Upload scan results as artefact
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: snyk-container-results
-          path: snyk-container.sarif
+          path: snyk-container.json
 
   # ──────────────────────────────────────────────
   # Stage 5: Security Engineer Agent - AI Review
@@ -149,24 +157,38 @@ jobs:
       - name: Prepare security context
         id: context
         run: |
-          # Combine all SARIF results into a single summary
           echo "## Scan Results Summary" > /tmp/security-context.md
           echo "" >> /tmp/security-context.md
 
+          # Parse SARIF from Snyk Code
           for sarif in /tmp/scan-results/*.sarif; do
+            [ -f "$sarif" ] || continue
             filename=$(basename "$sarif" .sarif)
             echo "### ${filename}" >> /tmp/security-context.md
-
-            # Extract results count and severity breakdown
             results=$(jq '[.runs[].results[]] | length' "$sarif" 2>/dev/null || echo "0")
             critical=$(jq '[.runs[].results[] | select(.level == "error")] | length' "$sarif" 2>/dev/null || echo "0")
             high=$(jq '[.runs[].results[] | select(.level == "warning")] | length' "$sarif" 2>/dev/null || echo "0")
             medium=$(jq '[.runs[].results[] | select(.level == "note")] | length' "$sarif" 2>/dev/null || echo "0")
-
             echo "- Total findings: ${results}" >> /tmp/security-context.md
             echo "- Critical/Error: ${critical}" >> /tmp/security-context.md
             echo "- High/Warning: ${high}" >> /tmp/security-context.md
             echo "- Medium/Note: ${medium}" >> /tmp/security-context.md
+            echo "" >> /tmp/security-context.md
+          done
+
+          # Parse JSON from Snyk Container
+          for json in /tmp/scan-results/*.json; do
+            [ -f "$json" ] || continue
+            filename=$(basename "$json" .json)
+            echo "### ${filename}" >> /tmp/security-context.md
+            critical=$(jq '[.vulnerabilities[] | select(.severity == "critical")] | length' "$json" 2>/dev/null || echo "0")
+            high=$(jq '[.vulnerabilities[] | select(.severity == "high")] | length' "$json" 2>/dev/null || echo "0")
+            medium=$(jq '[.vulnerabilities[] | select(.severity == "medium")] | length' "$json" 2>/dev/null || echo "0")
+            low=$(jq '[.vulnerabilities[] | select(.severity == "low")] | length' "$json" 2>/dev/null || echo "0")
+            echo "- Critical: ${critical}" >> /tmp/security-context.md
+            echo "- High: ${high}" >> /tmp/security-context.md
+            echo "- Medium: ${medium}" >> /tmp/security-context.md
+            echo "- Low: ${low}" >> /tmp/security-context.md
             echo "" >> /tmp/security-context.md
           done
 
@@ -178,9 +200,6 @@ jobs:
             cat security/threats/threat-model.json >> /tmp/security-context.md
             echo '```' >> /tmp/security-context.md
           fi
-
-          # Capture the PR diff for context
-          echo "context-file=/tmp/security-context.md" >> "$GITHUB_OUTPUT"
 
       - name: Get PR diff
         id: diff
@@ -195,69 +214,126 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          SCAN_SUMMARY=$(cat /tmp/security-context.md)
-          # Truncate to 50KB to stay within Claude's context window;
-          # if the diff is larger, the AI review covers only the first portion.
-          PR_DIFF=$(head -c 50000 /tmp/pr-diff.patch)
-          # CLAUDE.md contains the project security policy. If absent, the
-          # agent proceeds without project-specific policy context.
-          CLAUDE_MD=$(cat CLAUDE.md 2>/dev/null || echo "No CLAUDE.md found")
+          # Extract compact vulnerability list from JSON (avoids arg-list-too-long).
+          # Pulls only the fields Claude needs: id, severity, title, package, version, fixedIn.
+          {
+            for json in /tmp/scan-results/*.json; do
+              [ -f "$json" ] || continue
+              echo "=== $(basename "$json") ==="
+              jq -r '
+                .vulnerabilities[]
+                | "[\(.severity | ascii_upcase)] \(.id) — \(.title) | pkg: \(.packageName)@\(.version) | fix: \(.fixedIn[0] // "none")"
+              ' "$json" 2>/dev/null || echo "(no vulnerabilities)"
+            done
+            for sarif in /tmp/scan-results/*.sarif; do
+              [ -f "$sarif" ] || continue
+              echo "=== $(basename "$sarif") ==="
+              jq -r '
+                .runs[].results[]
+                | "[\(.level | ascii_upcase)] \(.ruleId) — \(.message.text[:120])"
+              ' "$sarif" 2>/dev/null || echo "(no findings)"
+            done
+          } > /tmp/scan-details-compact.txt
 
-          # Load SARIF details for the AI to analyse
-          SARIF_DETAILS=""
-          for sarif in /tmp/scan-results/*.sarif; do
-            filename=$(basename "$sarif")
-            SARIF_DETAILS="${SARIF_DETAILS}\n\n--- ${filename} ---\n$(cat "$sarif")"
-          done
+          # Write all large inputs to files; use --rawfile so jq reads them
+          # directly without hitting the shell argument size limit.
+          cat /tmp/security-context.md        > /tmp/claude-scan-summary.txt
+          head -c 30000 /tmp/pr-diff.patch    > /tmp/claude-pr-diff.txt
+          cat CLAUDE.md 2>/dev/null           > /tmp/claude-policy.txt || echo "No CLAUDE.md" > /tmp/claude-policy.txt
 
-          REVIEW=$(curl -s https://api.anthropic.com/v1/messages \
+          # Build the JSON payload to a file to avoid $() subshell hangs
+          # on large payloads and to keep special characters safe.
+          jq -n \
+            --rawfile scan_summary  /tmp/claude-scan-summary.txt \
+            --rawfile pr_diff       /tmp/claude-pr-diff.txt \
+            --rawfile claude_md     /tmp/claude-policy.txt \
+            --rawfile scan_details  /tmp/scan-details-compact.txt \
+            '{
+              model: "claude-sonnet-4-6",
+              max_tokens: 1024,
+              system: "You are a Security Engineer Agent reviewing a pull request. Analyse the scan results in the context of the code changes and produce a concise, structured review.\n\nYour response MUST start with one of these three verdict lines (exactly as written):\n- VERDICT: PASS\n- VERDICT: ADVISORY\n- VERDICT: FAIL\n\nRules for verdict selection (apply in order):\n1. If there are any CRITICAL or HIGH findings: use FAIL.\n2. If there are MEDIUM findings or SAST findings of any severity: use ADVISORY.\n3. If there are only LOW or INFO findings, or no findings at all: use PASS.\n\nFollow the verdict line with a one-sentence summary.\n\nThen the findings section — follow these rules strictly:\n- If there are SAST (Snyk Code) findings: list those FIRST, regardless of severity.\n- Only list individual findings for CRITICAL and HIGH severity. For each: severity, CVE/rule ID, package or file location, description, whether net-new (introduced by this PR) or pre-existing, recommended fix.\n- For MEDIUM, LOW, and INFO: do NOT list individual findings. Write one sentence with the counts only.\n- If there are no CRITICAL or HIGH findings, keep the findings section to 2-3 sentences maximum.\n\nEnd with exactly one of:\n✅ **Security Agent Sign-Off** — No blocking security issues identified.\n⚠️ **Security Agent Advisory** — Non-blocking issues identified. Review recommended.\n❌ **Security Agent Block** — Critical security issues must be resolved before merge.",
+              messages: [{
+                role: "user",
+                content: ("## Project Security Policy\n\n" + $claude_md + "\n\n## Scan Results Summary\n\n" + $scan_summary + "\n\n## Vulnerability Details\n\n" + $scan_details + "\n\n## PR Diff\n\n```patch\n" + $pr_diff + "\n```\n\nProvide your security verdict and assessment.")
+              }]
+            }' > /tmp/claude-payload.json
+
+          REVIEW=$(curl -s \
+            --connect-timeout 10 \
+            --max-time 90 \
+            https://api.anthropic.com/v1/messages \
             -H "content-type: application/json" \
             -H "x-api-key: ${ANTHROPIC_API_KEY}" \
             -H "anthropic-version: 2023-06-01" \
-            -d "$(jq -n \
-              --arg scan_summary "$SCAN_SUMMARY" \
-              --arg pr_diff "$PR_DIFF" \
-              --arg claude_md "$CLAUDE_MD" \
-              --arg sarif "$SARIF_DETAILS" \
-              '{
-                model: "claude-sonnet-4-6",
-                max_tokens: 4096,
-                system: "You are a Security Engineer Agent reviewing a pull request. Your role is to analyse security scan results in the context of the code changes and the project security policy, then provide a structured security review.\n\nYour review MUST include:\n1. A severity assessment: PASS, ADVISORY, or FAIL\n2. A summary of findings relevant to the PR changes\n3. Whether findings are net-new (introduced by this PR) or pre-existing\n4. Recommended actions if any\n5. Your sign-off statement\n\nFormat your response in Markdown suitable for a GitHub PR comment.\n\nIf there are no critical or high findings related to the PR changes, sign off with:\n\"✅ **Security Agent Sign-Off** - No blocking security issues identified.\"\n\nIf there are findings that need attention:\n\"⚠️ **Security Agent Advisory** - Non-blocking issues identified. Review recommended.\"\n\nIf there are critical findings:\n\"❌ **Security Agent Block** - Critical security issues must be resolved before merge.\"",
-                messages: [{
-                  role: "user",
-                  content: ("## Project Security Policy\n\n" + $claude_md + "\n\n## Scan Results\n\n" + $scan_summary + "\n\n## SARIF Details\n\n" + $sarif + "\n\n## PR Diff\n\n```patch\n" + $pr_diff + "\n```\n\nPlease review the security scan results in the context of this PR and provide your assessment.")
-                }]
-              }'
-          )")
+            --data-binary @/tmp/claude-payload.json)
 
-          # Extract the review text
-          REVIEW_TEXT=$(echo "$REVIEW" | jq -r '.content[0].text')
+          REVIEW_TEXT=$(echo "$REVIEW" | jq -r '.content[0].text // "Error: could not parse Claude response"')
           echo "$REVIEW_TEXT" > /tmp/security-review.md
+
+          # Derive a simple pass/fail badge from the verdict line
+          if grep -q "^VERDICT: FAIL" /tmp/security-review.md; then
+            echo "OVERALL_STATUS=FAIL" >> "$GITHUB_ENV"
+          elif grep -q "^VERDICT: ADVISORY" /tmp/security-review.md; then
+            echo "OVERALL_STATUS=ADVISORY" >> "$GITHUB_ENV"
+          else
+            echo "OVERALL_STATUS=PASS" >> "$GITHUB_ENV"
+          fi
 
       - name: Post security review to PR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Build the PR comment
+          # Determine top-level badge
+          case "$OVERALL_STATUS" in
+            FAIL)     BADGE="❌ FAIL — blocking security issues found" ;;
+            ADVISORY) BADGE="⚠️ ADVISORY — non-blocking issues found" ;;
+            *)        BADGE="✅ PASS — no blocking security issues" ;;
+          esac
+
           {
             echo "## 🔒 Security Engineer Agent Review"
             echo ""
-            echo "| Scan | Status |"
-            echo "|------|--------|"
+            echo "**Overall verdict: ${BADGE}**"
+            echo ""
+            echo "| Scan | Result | Critical | High | Medium | Low | Info |"
+            echo "|------|--------|:--------:|:----:|:------:|:---:|:----:|"
 
-            # Check each scan result
+            # SARIF-based scans (Snyk Code)
+            # SARIF levels: error=critical/high, warning=medium, note=low/info
             for sarif in /tmp/scan-results/*.sarif; do
+              [ -f "$sarif" ] || continue
               filename=$(basename "$sarif" .sarif)
-              results=$(jq '[.runs[].results[]] | length' "$sarif" 2>/dev/null || echo "0")
-              critical=$(jq '[.runs[].results[] | select(.level == "error")] | length' "$sarif" 2>/dev/null || echo "0")
-
-              if [ "$critical" -gt 0 ]; then
-                echo "| ${filename} | ❌ ${results} findings (${critical} critical) |"
-              elif [ "$results" -gt 0 ]; then
-                echo "| ${filename} | ⚠️ ${results} findings |"
+              s_error=$(jq '[.runs[].results[] | select(.level == "error")]   | length' "$sarif" 2>/dev/null || echo "0")
+              s_warn=$( jq '[.runs[].results[] | select(.level == "warning")] | length' "$sarif" 2>/dev/null || echo "0")
+              s_note=$( jq '[.runs[].results[] | select(.level == "note")]    | length' "$sarif" 2>/dev/null || echo "0")
+              s_total=$(jq '[.runs[].results[]] | length' "$sarif" 2>/dev/null || echo "0")
+              if [ "$s_error" -gt 0 ]; then
+                status="❌"
+              elif [ "$s_total" -gt 0 ]; then
+                status="⚠️"
               else
-                echo "| ${filename} | ✅ Clean |"
+                status="✅ Clean"
               fi
+              echo "| ${filename} | ${status} | ${s_error} | — | ${s_warn} | ${s_note} | — |"
+            done
+
+            # JSON-based scans (Snyk Container)
+            for json in /tmp/scan-results/*.json; do
+              [ -f "$json" ] || continue
+              filename=$(basename "$json" .json)
+              c_crit=$(jq '[.vulnerabilities[] | select(.severity == "critical")] | length' "$json" 2>/dev/null || echo "0")
+              c_high=$(jq '[.vulnerabilities[] | select(.severity == "high")]     | length' "$json" 2>/dev/null || echo "0")
+              c_med=$( jq '[.vulnerabilities[] | select(.severity == "medium")]   | length' "$json" 2>/dev/null || echo "0")
+              c_low=$( jq '[.vulnerabilities[] | select(.severity == "low")]      | length' "$json" 2>/dev/null || echo "0")
+              c_info=$(jq '[.vulnerabilities[] | select(.severity == "info")]     | length' "$json" 2>/dev/null || echo "0")
+              if [ "$c_crit" -gt 0 ] || [ "$c_high" -gt 0 ]; then
+                status="❌"
+              elif [ "$c_med" -gt 0 ] || [ "$c_low" -gt 0 ]; then
+                status="⚠️"
+              else
+                status="✅ Clean"
+              fi
+              echo "| ${filename} | ${status} | ${c_crit} | ${c_high} | ${c_med} | ${c_low} | ${c_info} |"
             done
 
             echo ""
@@ -270,7 +346,7 @@ jobs:
             echo "<sub>🤖 Automated review by Security Engineer Agent"
             echo "• Scans: Snyk Code (SAST) · Snyk Container"
             echo "• Review: Claude · $(date -u '+%Y-%m-%d %H:%M UTC')"
-            echo "• Artefacts: Full SARIF reports attached to this workflow run</sub>"
+            echo "• Artefacts: Full scan reports attached to this workflow run</sub>"
           } > /tmp/pr-comment.md
 
           gh pr comment ${{ github.event.pull_request.number }} \
