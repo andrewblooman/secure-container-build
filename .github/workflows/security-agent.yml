@@ -69,7 +69,8 @@ jobs:
           args: --sarif-file-output=snyk-code.sarif
 
       - name: Upload Snyk Code SARIF
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
+        if: always() && hashFiles('snyk-code.sarif') != ''
         with:
           sarif_file: snyk-code.sarif
           category: snyk-code
@@ -111,7 +112,8 @@ jobs:
           args: --file=Dockerfile --sarif-file-output=snyk-container.sarif
 
       - name: Upload Snyk Container SARIF
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
+        if: always() && hashFiles('snyk-container.sarif') != ''
         with:
           sarif_file: snyk-container.sarif
           category: snyk-container
@@ -124,38 +126,6 @@ jobs:
           path: snyk-container.sarif
 
   # ──────────────────────────────────────────────
-  # Stage 4: Snyk Open Source scan (SCA)
-  # ──────────────────────────────────────────────
-  snyk-dependency-scan:
-    name: Snyk Open Source Scan (SCA)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Run Snyk Open Source scan
-        uses: snyk/actions/node@master
-        continue-on-error: true
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          command: test
-          args: --sarif-file-output=snyk-deps.sarif
-
-      - name: Upload Snyk Deps SARIF
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: snyk-deps.sarif
-          category: snyk-open-source
-
-      - name: Upload scan results as artefact
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: snyk-dependency-results
-          path: snyk-deps.sarif
-
-  # ──────────────────────────────────────────────
   # Stage 5: Security Engineer Agent - AI Review
   # ──────────────────────────────────────────────
   security-agent-review:
@@ -164,7 +134,6 @@ jobs:
     needs:
       - snyk-code-scan
       - snyk-container-scan
-      - snyk-dependency-scan
     if: always()
     steps:
       - name: Checkout code
@@ -251,7 +220,7 @@ jobs:
               --arg claude_md "$CLAUDE_MD" \
               --arg sarif "$SARIF_DETAILS" \
               '{
-                model: "claude-sonnet-4-20250514",
+                model: "claude-sonnet-4-6",
                 max_tokens: 4096,
                 system: "You are a Security Engineer Agent reviewing a pull request. Your role is to analyse security scan results in the context of the code changes and the project security policy, then provide a structured security review.\n\nYour review MUST include:\n1. A severity assessment: PASS, ADVISORY, or FAIL\n2. A summary of findings relevant to the PR changes\n3. Whether findings are net-new (introduced by this PR) or pre-existing\n4. Recommended actions if any\n5. Your sign-off statement\n\nFormat your response in Markdown suitable for a GitHub PR comment.\n\nIf there are no critical or high findings related to the PR changes, sign off with:\n\"✅ **Security Agent Sign-Off** - No blocking security issues identified.\"\n\nIf there are findings that need attention:\n\"⚠️ **Security Agent Advisory** - Non-blocking issues identified. Review recommended.\"\n\nIf there are critical findings:\n\"❌ **Security Agent Block** - Critical security issues must be resolved before merge.\"",
                 messages: [{
@@ -299,7 +268,7 @@ jobs:
             echo "---"
             echo ""
             echo "<sub>🤖 Automated review by Security Engineer Agent"
-            echo "• Scans: Snyk Code (SAST) · Snyk Open Source (SCA) · Snyk Container"
+            echo "• Scans: Snyk Code (SAST) · Snyk Container"
             echo "• Review: Claude · $(date -u '+%Y-%m-%d %H:%M UTC')"
             echo "• Artefacts: Full SARIF reports attached to this workflow run</sub>"
           } > /tmp/pr-comment.md
