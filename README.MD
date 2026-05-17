@@ -4,6 +4,7 @@
 [![Security Engineer Agent](https://github.com/andrewblooman/secure-container-build/actions/workflows/security-agent.yml/badge.svg)](https://github.com/andrewblooman/secure-container-build/actions/workflows/security-agent.yml)
 [![Docker Pulls](https://img.shields.io/docker/pulls/andyblooman/secure-container-build)](https://hub.docker.com/r/andyblooman/secure-container-build)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Known Vulnerabilities](https://snyk.io/test/github/andrewblooman/secure-container-build/badge.svg)](https://snyk.io/test/github/andrewblooman/secure-container-build)
 
 This project demonstrates a secure container build pipeline that implements modern security best practices for building, scanning, signing, and publishing container images.
 
