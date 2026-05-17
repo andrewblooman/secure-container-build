@@ -1,5 +1,10 @@
 # Secure Container Build Pipeline
 
+[![Build, SBOM, Sign, and Attest](https://github.com/andrewblooman/secure-container-build/actions/workflows/actions.yml/badge.svg)](https://github.com/andrewblooman/secure-container-build/actions/workflows/actions.yml)
+[![Security Engineer Agent](https://github.com/andrewblooman/secure-container-build/actions/workflows/security-agent.yml/badge.svg)](https://github.com/andrewblooman/secure-container-build/actions/workflows/security-agent.yml)
+[![Docker Pulls](https://img.shields.io/docker/pulls/andyblooman/secure-container-build)](https://hub.docker.com/r/andyblooman/secure-container-build)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 This project demonstrates a secure container build pipeline that implements modern security best practices for building, scanning, signing, and publishing container images.
 
 ## Features
